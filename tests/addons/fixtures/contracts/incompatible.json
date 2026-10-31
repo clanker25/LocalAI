@@ -1,0 +1,65 @@
+[
+  {
+    "host": 2,
+    "api": 1,
+    "protocol": 1,
+    "sdk": 1,
+    "dataFormat": 1,
+    "os": "linux",
+    "arch": "amd64"
+  },
+  {
+    "host": 1,
+    "api": 4,
+    "protocol": 2,
+    "sdk": 0,
+    "dataFormat": 1,
+    "os": "linux",
+    "arch": "amd64"
+  },
+  {
+    "host": 1,
+    "api": 1,
+    "protocol": 3,
+    "sdk": 0,
+    "dataFormat": 1,
+    "os": "linux",
+    "arch": "amd64"
+  },
+  {
+    "host": 1,
+    "api": 1,
+    "protocol": 1,
+    "sdk": 3,
+    "dataFormat": 1,
+    "os": "linux",
+    "arch": "amd64"
+  },
+  {
+    "host": 0,
+    "api": 0,
+    "protocol": 1,
+    "sdk": 1,
+    "dataFormat": 4,
+    "os": "linux",
+    "arch": "amd64"
+  },
+  {
+    "host": 1,
+    "api": 1,
+    "protocol": 1,
+    "sdk": 1,
+    "dataFormat": 1,
+    "os": "unsupported",
+    "arch": "amd64"
+  },
+  {
+    "host": 0,
+    "api": 1,
+    "protocol": 2,
+    "sdk": 2,
+    "dataFormat": 1,
+    "os": "linux",
+    "arch": "unsupported"
+  }
+]
